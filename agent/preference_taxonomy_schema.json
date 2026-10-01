@@ -1,0 +1,251 @@
+{
+  "$schema_version": "1.0",
+  "title": "司机偏好通用抽象 Schema（包罗万象 / 泛化优先 / 允许字段冗余）",
+  "design_philosophy": {
+    "中文说明": "所有偏好共用同一个外壳 envelope，差异由高度泛化的约束谓词 constraint 承载。任何一条偏好都可表达为：在某个【周期 period / 时间窗 time_window】内，对某个【对象 subject】的某个【度量 metric】，施加某种【运算符 operator】与【目标 target（标量/集合/区域/时间/行程）】，违反则按【罚则 penalty】计罚。",
+    "正交维度": [
+      "约束对象（管什么）：time / cargo / geo / mileage / order / task",
+      "约束形态（怎么管）：方向(direction) × 周期(period) × 罚则(penalty)"
+    ],
+    "字段策略": "宁可冗余不可缺失。同一语义可在多处冗余出现（例如既给结构化 region，又保留 raw_text）。所有特化字段均可为 null，未用到即留空，保证一个超集结构能容纳全部类别。"
+  },
+
+  "coreference_and_place_registry": {
+    "_comment": "★ 关键：地名常一处定义、多处引用（指代消解 coreference）。光看单条偏好补不全坐标，必须把同一司机的全部偏好放在一起解析。",
+    "中文说明": "例 D002 林师傅：‘增城老档口(23.15,113.67)’只在第3条给了坐标，第6条‘增城老档口/增城区停一趟’、第7条‘增城区档口捎寿礼’都没给坐标，但指的是同一个点。因此解析单位是【司机】而非【单条偏好】。",
+    "parsing_pipeline": {
+      "stage_1_build_registry": "先扫描该司机全部偏好，抽取所有出现的地名→坐标，合并成一张 driver 级 place_registry。",
+      "stage_2_resolve_each": "再逐条解析；偏好内地名一律通过 region.place_ref / step.place_ref 引用 registry，坐标以 registry 为准（优先于内联坐标）。"
+    },
+    "place_kind_两种粒度": {
+      "named_point": "具名点：司机给了精确坐标的具体地点（老档口、家、接人点），用于‘到访/停留’，按 point_radius + tolerance_km 判定。",
+      "admin_area": "行政区：增城区/惠州/深圳/四会县城等‘面’，用于判断订单装卸货是否落在该区。本项目选型：用偏好里出现的【代表点 + admin_radius_km】近似该行政区，不引入外部行政边界数据。"
+    },
+    "driver_place_registry_schema": {
+      "driver_id": "string",
+      "places": {
+        "<地名key>": {
+          "kind": "named_point | admin_area",
+          "lat": "number|null，named_point 用",
+          "lng": "number|null，named_point 用",
+          "representative_lat": "number|null，admin_area 代表点",
+          "representative_lng": "number|null，admin_area 代表点",
+          "admin_radius_km": "number|null，admin_area 近似半径",
+          "defined_in": "string，坐标首次定义所在偏好id",
+          "referenced_in": "array<string>，仅引用未给坐标的偏好id列表",
+          "note": "string"
+        }
+      }
+    },
+    "registry_example_D002": {
+      "driver_id": "D002", "driver_name": "林师傅",
+      "places": {
+        "增城老档口": {"kind": "named_point", "lat": 23.15, "lng": 113.67, "defined_in": "NEW-D002#3", "referenced_in": ["NEW-D002#6", "NEW-D002#7"], "note": "‘增城老档口/增城区档口’均指此点；坐标仅第3条给出。"},
+        "增城区": {"kind": "admin_area", "representative_lat": 23.15, "representative_lng": 113.67, "admin_radius_km": 15, "defined_in": "NEW-D002#3", "note": "行政区‘面’，用老档口坐标作代表点 + 15km 近似，用于判断订单装卸货是否在增城。"},
+        "四会县城": {"kind": "admin_area", "representative_lat": 23.32, "representative_lng": 112.83, "admin_radius_km": 10, "defined_in": "NEW-D002#7", "note": "坐标第7条内联给出，同时登记入册。"}
+      }
+    }
+  },
+
+  "enums": {
+    "category": {
+      "TIME_REST": "一、作息时间类：每日休息/时段禁工/月度整天放空",
+      "CARGO_CATEGORY": "二、货物品类类：按货物品类禁接或慎接",
+      "GEO_SPATIAL": "三、空间地理类：必须在内/禁入/归位/按地名禁接",
+      "MILEAGE_DISTANCE": "四、里程距离类：单笔运距/单次空驶/月度累计空驶",
+      "ORDER_RHYTHM": "五、接单节奏类：日接单量上限/首单开工时间",
+      "POINT_VISIT_TASK": "六、定点到访与临时专项类：周期到访频次/指定订单必接/复杂临时行程"
+    },
+    "subcategory": [
+      "daily_continuous_rest", "daily_forbidden_window", "monthly_full_rest_days",
+      "cargo_forbid", "cargo_soft_avoid",
+      "geo_must_inside", "geo_must_outside", "geo_homing", "geo_named_place_forbid",
+      "mileage_haul_cap", "mileage_deadhead_single_cap", "mileage_deadhead_monthly_cap",
+      "order_count_daily_cap", "order_first_start_time",
+      "visit_frequency_quota", "designated_order_must_take", "adhoc_complex_itinerary"
+    ],
+    "direction": {
+      "MUST": "必须满足（达标/出勤/到访/接指定单）",
+      "FORBID": "完全禁止（禁接/禁入/禁工）",
+      "CAP_MAX": "上限封顶（≤阈值，超出违规）",
+      "QUOTA_MIN": "下限达标（≥阈值，不足违规）",
+      "SOFT_PREFER": "软偏好（尽量，违反罚较轻）"
+    },
+    "hardness": ["hard", "soft"],
+    "subject": [
+      "vehicle_position", "rest_state", "work_activity", "calendar_day",
+      "cargo", "order", "haul_route", "deadhead_route", "itinerary"
+    ],
+    "metric": [
+      "duration_hours", "time_of_day", "calendar_day_count",
+      "cargo_category", "cargo_specific_id",
+      "location", "region_containment", "distance_km", "deadhead_km",
+      "order_count", "start_time_of_day", "visit_distinct_days"
+    ],
+    "operator": [
+      "<=", ">=", "==", "between",
+      "in_set", "not_in_set",
+      "within_region", "outside_region", "near_point",
+      "must_occur", "must_not_occur", "must_visit", "must_follow_itinerary"
+    ],
+    "period_type": ["daily", "monthly", "weekday_only", "date_range", "once"],
+    "region_type": ["circle", "bbox", "point_radius", "named_admin_area"],
+    "containment": ["must_be_inside", "must_be_outside"],
+    "place_role": ["pickup", "dropoff", "any", "home", "rendezvous", "destination"],
+    "penalty_model": [
+      "per_violation_fixed",
+      "per_unit_overflow",
+      "per_time_unit",
+      "one_time_fixed",
+      "per_missing_quota"
+    ],
+    "penalty_unit": ["occurrence", "km", "order", "minute", "hour", "day"],
+    "composite_logic": ["AND", "OR"]
+  },
+
+  "universal_preference_schema": {
+    "_comment": "★ 统一超集：每条偏好都填这一个结构。所有 *_payload 与 constraint 子块按需启用，其余留 null。",
+    "preference_id": "string，全局唯一，如 D001#1",
+    "driver_id": "string",
+    "driver_name": "string",
+    "raw_text": "string，原始偏好原文，永远保留以便回溯与人工校验",
+    "source_file": "string，来源文件路径",
+
+    "category": "enums.category 之一",
+    "subcategory": "enums.subcategory 之一",
+    "intent_direction": "enums.direction 之一",
+    "hardness": "hard | soft",
+    "priority": "int，越大越优先（软偏好低、临时大额约定高）",
+
+    "validity": {
+      "start_time": "YYYY-MM-DD HH:MM:SS",
+      "end_time": "YYYY-MM-DD HH:MM:SS",
+      "_comment": "偏好整体生效区间，来自原始数据 start_time/end_time"
+    },
+
+    "constraint": {
+      "_comment": "★ 泛化约束谓词。subject+metric+operator+target 四元组描述‘约束什么、如何比较’。",
+      "subject": "enums.subject 之一",
+      "metric": "enums.metric 之一",
+      "operator": "enums.operator 之一",
+
+      "scalar_value": "number|null，标量阈值（小时/公里/单数/天数）",
+      "scalar_unit": "string|null，hour/km/order/day 等",
+      "value_set": "array|null，集合型目标（品类列表、指定ID）",
+
+      "period": {
+        "type": "enums.period_type 之一",
+        "specific_dates": "array<string>|null，特定日期，如 ['2026-03-04','2026-03-05']",
+        "date_range": "{start,end}|null",
+        "reset": "string|null，配额结算口径，如 calendar_month / per_day"
+      },
+
+      "time_window": {
+        "_comment": "时段型约束（每日某段时间）。null 表示不限时段。",
+        "start": "HH:MM|null",
+        "end": "HH:MM|null",
+        "crosses_midnight": "bool",
+        "applies_to": "array|null，该时段内被禁/被要求的活动，如 ['take_order','deadhead_drive']"
+      },
+
+      "region": {
+        "_comment": "地理区域型约束。type 决定启用哪些字段，其余留 null。",
+        "type": "enums.region_type 之一 | null",
+        "containment": "must_be_inside | must_be_outside | null",
+        "center_lat": "number|null",
+        "center_lng": "number|null",
+        "radius_km": "number|null",
+        "bbox": "{min_lat,max_lat,min_lng,max_lng}|null",
+        "named_area": "string|null，行政区/地名，如 '惠州市' / '增城区'",
+        "place_role": "enums.place_role|null，按装货/卸货/任意 匹配地名",
+        "tolerance_km": "number|null，到点判定容差（如 1km 内算到家）",
+        "place_ref": "string|null，引用 driver.place_registry 中的地点 key（如 '增城老档口'）。填了 place_ref 时坐标以注册表为准，优先于本块内联坐标——这是指代消解的落点。",
+        "place_kind": "named_point | admin_area | null，地点粒度。admin_area 用代表点 + admin_radius_km 近似判定。",
+        "admin_radius_km": "number|null，行政区近似判定半径（仅 place_kind=admin_area 时使用）"
+      },
+
+      "cargo": {
+        "_comment": "货物型约束。",
+        "match_by": "category | specific_id | null",
+        "categories": "array<string>|null，品类列表，如 ['化工塑料','煤炭矿产']",
+        "specific_ids": "array<string>|null，指定货源编号"
+      },
+
+      "quota": {
+        "_comment": "频次/配额型（至少 N 个不同日 / 至少 N 整天 / 至多 N 单）。",
+        "count": "number|null",
+        "count_unit": "distinct_days | full_days | orders | null",
+        "comparator": ">= | <= | null",
+        "distinct_by": "string|null，去重口径，如 calendar_day"
+      },
+
+        "itinerary": {
+          "_comment": "复杂临时行程型（多点 + 时间窗 + 停留）。仅 POINT_VISIT_TASK 的 adhoc 子类使用。",
+          "steps": [
+            {
+              "seq": "int，步骤顺序",
+              "action": "string，如 pick_up_person / arrive / dwell / stay_home / attend_banquet",
+              "date": "date|null，步骤归属日期，如 2026-03-12；特定日期任务必须填",
+              "raw_time_expr": "string|null，原文时间表达，如 当天/上午/中午十二点前/下午两点",
+              "time_constraint": {
+                "type": "anytime_on_date | before | after | between | exact_hold_until | null",
+                "start": "datetime|null，归一化起点；如 上午 可归一到当日 00:00",
+                "end": "datetime|null，归一化终点；如 上午/十二点前 可归一到当日 12:00"
+              },
+              "location": "{lat,lng}|null",
+              "named_location": "string|null",
+              "place_role": "enums.place_role|null",
+              "arrive_before": "datetime|null",
+              "depart_after": "datetime|null",
+              "dwell_min_minutes": "number|null，最短停留",
+              "must_be_static_until": "datetime|null，须静止守候到某时刻",
+              "place_ref": "string|null，该步骤地点引用 registry 的 key；地名无坐标时靠它补全（如 step 的 '增城老档口'）",
+              "immediate_after_prev": "boolean|null，是否上一阶段完成后立刻去本阶段"
+            }
+          ]
+        },
+
+      "composite_logic": "AND | OR | null，多谓词组合逻辑。一条原文含多个【独立判定】时用 AND（全须满足）/OR（满足其一）；单谓词时为 null，直接读顶层 subject/metric/operator。",
+      "predicates": [
+        {
+          "_comment": "★ 子谓词：与顶层 constraint 同构的精简版。【本项目选型】一条原文的多个谓词在单条内合并表达，不拆成多条 envelope。单谓词偏好此数组留空 []。",
+          "subject": "enums.subject 之一",
+          "metric": "enums.metric 之一",
+          "operator": "enums.operator 之一",
+          "scalar_value": "number|null",
+          "scalar_unit": "string|null",
+          "value_set": "array|null",
+          "time_window": "同上 time_window 结构 | null",
+          "region": "同上 region 结构 | null",
+          "cargo": "同上 cargo 结构 | null",
+          "quota": "同上 quota 结构 | null",
+          "penalty_override": "同下 penalty 结构 | null；该子谓词独立罚则，null=与其它谓词共享顶层 penalty",
+          "note": "string，本子谓词说明"
+        }
+      ]
+    },
+
+    "penalty": {
+      "_comment": "★ 泛化罚则，支持多段叠加（components）。单段时可直接读顶层字段。",
+      "model": "enums.penalty_model 之一",
+      "amount": "number，单位罚金",
+      "unit": "enums.penalty_unit 之一",
+      "cap": "number|null，月度（或区间）封顶；null 表示不封顶",
+      "uncapped": "bool，true=上不封顶",
+      "components": [
+        {
+          "model": "enums.penalty_model 之一",
+          "amount": "number",
+          "unit": "enums.penalty_unit 之一",
+          "trigger": "string，触发条件描述",
+          "cap": "number|null"
+        }
+      ],
+      "raw_penalty_amount": "number，原始数据 penalty_amount 原值（冗余保留）",
+      "raw_penalty_cap": "number|null，原始数据 penalty_cap 原值（冗余保留）"
+    },
+
+    "tags": "array<string>，自由标签，便于检索（如 ['夜间','熄火','软偏好']）",
+    "notes": "string，解析备注/歧义说明"
+  }
+}
